@@ -27,6 +27,9 @@ export async function generate(
       nPhongThi: req.body.nPhongThi,
       thoiGianPhut: req.body.thoiGianPhut,
       nNganHang: req.body.nNganHang,
+      includeSituational: req.body.includeSituational,
+      difficulty: req.body.difficulty,
+      topicHint: req.body.topicHint,
       clinicalCases: req.body.clinicalCases,
     });
     ok(res, data, 201);

@@ -1,4 +1,5 @@
 import { Router } from "express";
+import adminRoutes from "./admin.routes";
 import authRoutes from "./auth.routes";
 import documentRoutes from "./document.routes";
 import quizRoutes from "./quiz.routes";
@@ -10,6 +11,7 @@ router.get("/health", (_req, res) => {
   res.json({ success: true, data: { status: "ok" } });
 });
 
+router.use("/admin", adminRoutes);
 router.use("/auth", authRoutes);
 router.use("/documents", documentRoutes);
 router.use("/quizzes", quizRoutes);

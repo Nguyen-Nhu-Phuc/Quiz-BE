@@ -1,11 +1,14 @@
 import type { Types } from "mongoose";
-import type { ClinicalCaseInput, Question } from "../@types/question";
+import type {
+  ClinicalCaseInput,
+  Question,
+  QuizDifficulty,
+} from "../@types/question";
+import { getRuntimeConfig } from "../config/runtimeConfig";
 import {
-  DEFAULT_N_ON_LUYEN,
-  DEFAULT_N_PHONG_THI,
-  DEFAULT_THOI_GIAN_PHUT,
-  N_NGAN_HANG_MIN,
-} from "../config/constants";
+  decodeUploadFilename,
+  titleFromFilename,
+} from "../helpers/filenameEncoding";
 import { requireObjectId } from "../helpers/objectId";
 import { AppError } from "../middlewares/error.middleware";
 import { QuizSetModel, type QuizSetDocument } from "../models/QuizSet.model";
@@ -27,6 +30,9 @@ export async function generateQuizSet(input: {
   thoiGianPhut?: number;
   /** Mục tiêu số câu unique trong bank. */
   nNganHang?: number;
+  includeSituational?: boolean;
+  difficulty?: QuizDifficulty;
+  topicHint?: string;
   clinicalCases?: ClinicalCaseInput[];
 }) {
   const ids =
@@ -40,11 +46,12 @@ export async function generateQuizSet(input: {
     throw new AppError(400, "Cần documentId hoặc documentIds.");
   }
 
-  const nOnLuyen = input.nOnLuyen ?? DEFAULT_N_ON_LUYEN;
-  const nPhongThi = input.nPhongThi ?? DEFAULT_N_PHONG_THI;
+  const runtime = getRuntimeConfig();
+  const nOnLuyen = input.nOnLuyen ?? runtime.nOnLuyen;
+  const nPhongThi = input.nPhongThi ?? runtime.nPhongThi;
   const targetCount =
     input.nNganHang ??
-    Math.max(nOnLuyen, nPhongThi, N_NGAN_HANG_MIN);
+    Math.max(nOnLuyen, nPhongThi, runtime.nNganHang);
 
   // 1) Lấy file → 2) Gemini tạo đúng ~targetCount câu unique → 3) lưu → FE
   const docs = await prepareDocumentsForGemini(ids, input.userId);
@@ -61,6 +68,9 @@ export async function generateQuizSet(input: {
       {
         clinicalCases: input.clinicalCases,
         targetCount,
+        includeSituational: true,
+        difficulty: input.difficulty ?? "trung_binh",
+        topicHint: input.topicHint,
       },
     );
   } catch (err) {
@@ -85,9 +95,9 @@ export async function generateQuizSet(input: {
   await markDocumentsReady(docs, preview);
 
   const title =
-    input.title?.trim() ||
+    decodeUploadFilename(input.title?.trim() || "") ||
     (docs.length === 1
-      ? primary.originalName.replace(/\.[^.]+$/, "")
+      ? titleFromFilename(primary.originalName)
       : `Bộ câu hỏi (${docs.length} tài liệu)`) ||
     "Bộ câu hỏi";
 
@@ -101,12 +111,12 @@ export async function generateQuizSet(input: {
     questionBank: result.questionBank,
     meta: {
       ...result.meta,
-      nNganHangMin: N_NGAN_HANG_MIN,
+      nNganHangMin: runtime.nNganHang,
     },
     defaults: {
       nOnLuyen,
       nPhongThi,
-      thoiGianPhut: input.thoiGianPhut ?? DEFAULT_THOI_GIAN_PHUT,
+      thoiGianPhut: input.thoiGianPhut ?? runtime.thoiGianPhut,
     },
     status: "ready",
   })) as unknown as QuizSetDocument;
@@ -116,10 +126,11 @@ export async function generateQuizSet(input: {
 
 export function effectiveCounts(quiz: QuizSetDocument) {
   const bankLen = quiz.questionBank.length;
+  const runtime = getRuntimeConfig();
   const defaults = quiz.defaults ?? {
-    nOnLuyen: DEFAULT_N_ON_LUYEN,
-    nPhongThi: DEFAULT_N_PHONG_THI,
-    thoiGianPhut: DEFAULT_THOI_GIAN_PHUT,
+    nOnLuyen: runtime.nOnLuyen,
+    nPhongThi: runtime.nPhongThi,
+    thoiGianPhut: runtime.thoiGianPhut,
   };
   return {
     bankSize: bankLen,
@@ -138,7 +149,7 @@ export function summarizeQuizSet(quiz: QuizSetDocument) {
     id: quiz._id.toString(),
     documentId: quiz.documentId.toString(),
     documentIds,
-    title: quiz.title,
+    title: decodeUploadFilename(quiz.title),
     mode: quiz.mode,
     modeReason: quiz.modeReason,
     status: quiz.status,
@@ -171,10 +182,11 @@ export async function listQuizSets(userId: Types.ObjectId) {
   ]);
 
   return list.map((q) => {
+    const runtime = getRuntimeConfig();
     const defaults = q.defaults ?? {
-      nOnLuyen: DEFAULT_N_ON_LUYEN,
-      nPhongThi: DEFAULT_N_PHONG_THI,
-      thoiGianPhut: DEFAULT_THOI_GIAN_PHUT,
+      nOnLuyen: runtime.nOnLuyen,
+      nPhongThi: runtime.nPhongThi,
+      thoiGianPhut: runtime.thoiGianPhut,
     };
     const bankLen = q.bankSize as number;
     const documentIds = Array.isArray(q.documentIds)
@@ -186,7 +198,7 @@ export async function listQuizSets(userId: Types.ObjectId) {
       id: String(q._id),
       documentId: String(q.documentId),
       documentIds,
-      title: q.title as string,
+      title: decodeUploadFilename(String(q.title ?? "")),
       mode: q.mode as string,
       modeReason: q.modeReason as string,
       status: q.status as string,

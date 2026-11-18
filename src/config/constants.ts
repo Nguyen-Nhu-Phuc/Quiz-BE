@@ -2,6 +2,8 @@ export const DEFAULT_N_ON_LUYEN = 15;
 export const DEFAULT_N_PHONG_THI = 60;
 export const DEFAULT_THOI_GIAN_PHUT = 30;
 export const N_NGAN_HANG_MIN = 60;
+/** Giới hạn thời gian tạo ngân hàng câu hỏi (giây). Hết giờ → trả số câu đã có. */
+export const DEFAULT_GENERATION_TIME_BUDGET_SEC = 180;
 export const N_NGAN_HANG_GOI_Y_MIN = 70;
 export const N_NGAN_HANG_GOI_Y_MAX = 90;
 

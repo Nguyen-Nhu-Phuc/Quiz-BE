@@ -7,8 +7,10 @@ import type {
   DocumentMode,
   GeminiQuizResult,
   Question,
+  QuizDifficulty,
 } from "../@types/question";
 import { EXTRACT_BANK_REVIEW_THRESHOLD } from "../config/constants";
+import { getRuntimeConfig } from "../config/runtimeConfig";
 import { env } from "../config/env";
 import {
   isTransientGeminiError,
@@ -21,8 +23,11 @@ import {
 import {
   createGeminiClients,
   isGeminiKeyExhaustedError,
+  isPerModelDailyQuotaError,
+  isTransientRateLimitError,
   markGeminiKeyExhausted,
   maskGeminiKey,
+  recordGeminiKeyUse,
   requireGeminiApiKeys,
 } from "../helpers/geminiKeys";
 import { extractJsonLoose } from "../helpers/jsonRepair";
@@ -32,8 +37,56 @@ import type { GoogleAIFileManager } from "@google/generative-ai/server";
 
 const BATCH_SIZE = 40;
 
-function buildSystemPrompt(targetCount: number): string {
-  return `Bạn là gia sư ôn luyện. Đọc kỹ TÀI LIỆU ĐÍNH KÈM và trả về JSON ngân hàng câu hỏi trắc nghiệm.
+function difficultyGuide(level: QuizDifficulty): string {
+  if (level === "de") {
+    return "Độ khó DỄ: tình huống ngắn, hỏi nhận biết / áp dụng trực tiếp 1 ý trong tài liệu; đáp án nhiễu rõ ràng hơn.";
+  }
+  if (level === "kho") {
+    return "Độ khó KHÓ: tình huống nhiều yếu tố, cần suy luận / ưu tiên xử trí / loại trừ; đáp án nhiễu gần đúng.";
+  }
+  return "Độ khó TRUNG BÌNH: tình huống thực tế vừa phải, hỏi quyết định hoặc giải thích dựa tài liệu.";
+}
+
+function buildSystemPrompt(
+  targetCount: number,
+  options: {
+    includeSituational: boolean;
+    difficulty: QuizDifficulty;
+    topicHint?: string;
+  },
+): string {
+  const mixBlock = options.includeSituational
+    ? `
+## BẮT BUỘC TRỘN 2 LOẠI CÂU (mỗi batch và cả bank)
+Luôn tạo **cả hai** trong cùng ngân hàng — không được chỉ có một loại:
+
+### A) Lý thuyết — type "trac_nghiem" (~50–60% bank)
+- Hỏi định nghĩa, nguyên lý, quy định, dấu hiệu, phân loại, đúng/sai kiến thức.
+- Stem ngắn, rõ, không cần dựng tình huống dài.
+
+### B) Tình huống — type "tinh_huong" hoặc "lam_sang" (~40–50% bank)
+- Kiểu NotebookLM: bối cảnh ngắn → hỏi quyết định / bước tiếp / nhận định đúng.
+- "tinh_huong": tình huống chung (quy trình, kỹ thuật, quản lý…) từ tài liệu.
+- "lam_sang": chỉ khi tài liệu y khoa (bệnh nhân, triệu chứng, xử trí).
+- Format stem gợi ý: "Tình huống: …\\nCâu hỏi: …" (hoặc 2–4 câu mô tả + 1 câu hỏi).
+
+### Quy tắc chung
+- Cả hai loại đều trắc nghiệm 4 đáp án; explanation bám tài liệu; paraphrase (chống RECITATION).
+- Mỗi batch phải có **cả** câu lý thuyết và câu tình huống (không dump một loại).
+- Không pad clone; mỗi câu ý độc lập.
+- EXTRACT: giữ câu gốc; bổ sung thêm lý thuyết + tình huống mới nếu bank thiếu một trong hai loại.
+- ${difficultyGuide(options.difficulty)}
+`
+    : `
+## LOẠI CÂU
+- Ưu tiên type "trac_nghiem" (lý thuyết). Chỉ giữ tình huống nếu đã có sẵn trong đề EXTRACT.
+`;
+
+  const topicBlock = options.topicHint?.trim()
+    ? `\n## CHỦ ĐỀ / YÊU CẦU THÊM CỦA NGƯỜI DÙNG\n${options.topicHint.trim()}\nƯu tiên phủ chủ đề này nhưng vẫn bám tài liệu; không bịa ngoài nguồn.\n`
+    : "";
+
+  return `Bạn là gia sư ôn luyện (phong cách quiz NotebookLM). Đọc kỹ TÀI LIỆU ĐÍNH KÈM và trả về JSON ngân hàng câu hỏi trắc nghiệm.
 
 ## MỤC TIÊU SỐ LƯỢNG
 - Người dùng yêu cầu khoảng ${targetCount} câu UNIQUE (stem khác nhau rõ).
@@ -41,6 +94,7 @@ function buildSystemPrompt(targetCount: number): string {
 - ZERO_NEAR_DUPLICATE: CẤM trùng stem / biến thể wording gần / chỉ đổi mã số / xáo choices.
 - CẤM clone khuôn câu chỉ đổi vài từ để đủ số. Mỗi câu phải hỏi ý khác nhau từ tài liệu.
 - Không để stem trống. PDF scan: đọc/OCR chữ rồi mới trích/sinh.
+- CHỐNG RECITATION: không copy nguyên văn dài từ PDF; paraphrase stem/choices/explanation; chỉ giữ thuật ngữ & số liệu.
 
 ## MODE
 1. Tài liệu đã là đề/trắc nghiệm (nhiều Câu N + A/B/C/D) → EXTRACT: trích tối đa câu có sẵn.
@@ -48,16 +102,8 @@ function buildSystemPrompt(targetCount: number): string {
 3. Nếu tài liệu không đủ ý độc lập để đạt ${targetCount}, trả hết câu unique được và meta.hasMore=false + lyDoBankNganHonTarget.
 
 ## Schema mỗi câu
-id, stem (không rỗng), choices[4], correctIndex (0-3), explanation, topic, type ("trac_nghiem"|"lam_sang")
-
-## CASE LÂM SÀNG (BẮT BUỘC — do bạn tự tạo)
-- Luôn tự viết câu type "lam_sang" dựa trên kiến thức / tình huống trong tài liệu đính kèm.
-- Không chờ người dùng cung cấp case. Tự dựng tình huống lâm sàng ngắn (bệnh nhân, bối cảnh, dấu hiệu) rồi hỏi quyết định/kiến thức liên quan tài liệu.
-- Stem = tình huống + câu hỏi; 4 đáp án; explanation bám tài liệu.
-- Tỷ lệ gợi ý: khoảng 15–25% bank là "lam_sang" (còn lại "trac_nghiem"), miễn là nội dung tài liệu cho phép; không pad clone để đủ tỷ lệ.
-- EXTRACT: giữ câu gốc; vẫn bổ sung thêm case lâm sàng mới (type lam_sang) từ kiến thức trong tài liệu nếu chưa có sẵn — không đè / không viết lại câu đã extract.
-- Mỗi case phải stem khác rõ; ZERO_NEAR_DUPLICATE áp dụng cả lam_sang.
-
+id, stem (không rỗng), choices[4], correctIndex (0-3), explanation, topic, type ("trac_nghiem"|"tinh_huong"|"lam_sang")
+${mixBlock}${topicBlock}
 ## Output — CHỈ JSON:
 {
   "mode": "EXTRACT" | "GENERATE",
@@ -72,12 +118,14 @@ id, stem (không rỗng), choices[4], correctIndex (0-3), explanation, topic, ty
 }`;
 }
 
+/** Ưu tiên lite khi model chính hết RPD free tier (quota theo model, không phải cả tài khoản). */
 const FALLBACK_MODELS = [
   "gemini-3.5-flash",
-  "gemini-3.6-flash",
   "gemini-3.5-flash-lite",
   "gemini-3.1-flash-lite",
   "gemini-flash-latest",
+  "gemini-2.0-flash",
+  "gemini-2.0-flash-lite",
 ];
 
 export type SourceDocumentFile = {
@@ -90,7 +138,16 @@ export type GenerateBankOptions = {
   clinicalCases?: ClinicalCaseInput[];
   /** Số câu unique mong muốn trong ngân hàng. */
   targetCount: number;
+  /** Trộn câu hỏi tình huống kiểu NotebookLM (mặc định true). */
+  includeSituational?: boolean;
+  difficulty?: QuizDifficulty;
+  /** Gợi ý chủ đề / prompt thêm (vd. "triệu chứng thai kỳ nguy cơ cao"). */
+  topicHint?: string;
 };
+
+function isSituationalType(type: string | undefined): boolean {
+  return type === "tinh_huong" || type === "lam_sang";
+}
 
 type ContentPart =
   | { text: string }
@@ -101,7 +158,7 @@ function sleep(ms: number) {
 }
 
 function modelCandidates(): string[] {
-  const preferred = env.geminiModel?.trim();
+  const preferred = getRuntimeConfig().geminiModel?.trim() || env.geminiModel?.trim();
   const list = preferred
     ? [preferred, ...FALLBACK_MODELS.filter((m) => m !== preferred)]
     : [...FALLBACK_MODELS];
@@ -143,10 +200,41 @@ function sanitizeBank(rawBank: unknown[]): Question[] {
   return sanitized;
 }
 
+function isRecitationFinish(finishReason?: string): boolean {
+  return String(finishReason ?? "").toUpperCase() === "RECITATION";
+}
+
+function throwRecitationError(finishReason?: string): never {
+  throw new AppError(
+    502,
+    "Gemini chặn vì nội dung quá giống tài liệu gốc (RECITATION). Đang thử viết lại / paraphrase…",
+    { recitation: true, finishReason: finishReason || "RECITATION" },
+  );
+}
+
+export function isGeminiRecitationError(err: unknown): boolean {
+  if (err instanceof AppError) {
+    const d = err.details as { recitation?: boolean } | undefined;
+    if (d?.recitation) return true;
+    return /RECITATION/i.test(err.message);
+  }
+  const msg = err instanceof Error ? err.message : String(err);
+  return /RECITATION/i.test(msg);
+}
+
+const ANTI_RECITATION_APPENDIX = `
+## CHỐNG RECITATION (BẮT BUỘC)
+- CẤM trích nguyên văn dài từ tài liệu / sách giáo khoa / đề thi.
+- Viết lại stem, choices, explanation bằng lời của bạn (paraphrase); chỉ giữ thuật ngữ chuyên môn, số liệu, tên riêng.
+- Ưu tiên mode GENERATE (câu hỏi mới dựa kiến thức tài liệu), không copy-paste đoạn dài.
+- Không tái tạo chuỗi ≥ 10 từ liên tiếp từ nguồn.
+- Chỉ trả JSON questionBank như schema.
+`;
+
 function safeResponseText(result: {
   response: {
     text: () => string;
-    candidates?: Array<{ finishReason?: string }>;
+    candidates?: Array<{ finishReason?: string; content?: { parts?: Array<{ text?: string }> } }>;
     promptFeedback?: { blockReason?: string };
   };
 }): { text: string; finishReason?: string } {
@@ -155,10 +243,25 @@ function safeResponseText(result: {
   if (block) {
     throw new AppError(422, `Gemini chặn nội dung (${block}).`);
   }
+  if (isRecitationFinish(finishReason)) {
+    // Đôi khi vẫn có partial text trước khi bị cắt — thử lấy; nếu trống thì lỗi recitation
+    const partial = (result.response.candidates?.[0]?.content?.parts ?? [])
+      .map((p) => p.text ?? "")
+      .join("")
+      .trim();
+    if (partial.length > 40) {
+      console.warn("[gemini] RECITATION nhưng còn partial — dùng partial");
+      return { text: partial, finishReason };
+    }
+    throwRecitationError(finishReason);
+  }
   try {
     return { text: result.response.text() ?? "", finishReason };
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
+    if (isRecitationFinish(finishReason) || /RECITATION/i.test(msg)) {
+      throwRecitationError(finishReason || "RECITATION");
+    }
     throw new AppError(
       502,
       `Gemini không trả text (${finishReason || msg}).`,
@@ -170,13 +273,19 @@ async function generateWithModelFallback(
   genAI: GoogleGenerativeAI,
   parts: ContentPart[],
   apiKey?: string,
+  opts?: { temperature?: number; antiRecitation?: boolean },
 ) {
+  const temperature = opts?.temperature ?? (opts?.antiRecitation ? 0.55 : 0.25);
+  const requestParts: ContentPart[] = opts?.antiRecitation
+    ? [...parts, { text: ANTI_RECITATION_APPENDIX }]
+    : parts;
+
   let lastErr: unknown;
   for (const modelName of modelCandidates()) {
     const model = genAI.getGenerativeModel({
       model: modelName,
       generationConfig: {
-        temperature: 0.25,
+        temperature,
         responseMimeType: "application/json",
         maxOutputTokens: 8192,
       },
@@ -184,17 +293,71 @@ async function generateWithModelFallback(
 
     for (let attempt = 0; attempt < 3; attempt += 1) {
       try {
-        const result = await model.generateContent(parts);
-        if (modelName !== env.geminiModel) {
+        if (apiKey) recordGeminiKeyUse(apiKey);
+        const result = await model.generateContent(requestParts);
+        // Kiểm tra RECITATION sớm (HTTP 200 nhưng không có text)
+        const finishReason = result.response.candidates?.[0]?.finishReason;
+        if (isRecitationFinish(finishReason)) {
+          const partial = (result.response.candidates?.[0]?.content?.parts ?? [])
+            .map((p: { text?: string }) => p.text ?? "")
+            .join("")
+            .trim();
+          if (partial.length > 40) {
+            console.warn(
+              `[gemini] RECITATION+partial · model=${modelName} · dùng partial`,
+            );
+            return result;
+          }
+          lastErr = new AppError(502, "RECITATION", { recitation: true });
+          console.warn(
+            `[gemini] RECITATION · model=${modelName} · attempt ${attempt + 1}`,
+          );
+          if (!opts?.antiRecitation) {
+            // Thử lại ngay với anti-recitation trên cùng model
+            break;
+          }
+          if (attempt < 2) {
+            await sleep(800);
+            continue;
+          }
+          break;
+        }
+        if (modelName !== getRuntimeConfig().geminiModel) {
           console.info(`[gemini] OK với model=${modelName}`);
         }
         return result;
       } catch (err) {
         lastErr = err;
         const msg = err instanceof Error ? err.message : String(err);
+
+        // Hết RPD của 1 model → thử model khác (đừng đốt cả API key ngay).
+        if (isPerModelDailyQuotaError(err)) {
+          console.warn(
+            `[gemini] Model ${modelName} hết hạn mức ngày (free tier) — thử model khác`,
+          );
+          break;
+        }
+
+        // RPM / quá tải tạm → chờ rồi thử lại, không đánh dấu key chết.
+        if (isTransientRateLimitError(err) && attempt < 2) {
+          console.warn(
+            `[gemini] Rate limit tạm · model=${modelName} · attempt ${attempt + 1}`,
+          );
+          await sleep(2500 * (attempt + 1));
+          continue;
+        }
+        if (isTransientRateLimitError(err)) {
+          console.warn(`[gemini] Rate limit · bỏ model=${modelName}`);
+          break;
+        }
+
         if (isGeminiKeyExhaustedError(err)) {
           if (apiKey) markGeminiKeyExhausted(apiKey, msg);
           throw toGeminiAppError(err, "Gemini generate");
+        }
+        if (isGeminiRecitationError(err)) {
+          console.warn(`[gemini] RECITATION throw · model=${modelName}`);
+          break;
         }
         if (/404|no longer available/i.test(msg)) {
           console.warn(`[gemini] model ${modelName} unavailable`);
@@ -211,6 +374,34 @@ async function generateWithModelFallback(
         throw toGeminiAppError(err, "Gemini generate");
       }
     }
+  }
+
+  // Tất cả model đều hết RPD free tier → mới đánh dấu key.
+  if (isPerModelDailyQuotaError(lastErr)) {
+    if (apiKey) {
+      markGeminiKeyExhausted(
+        apiKey,
+        lastErr instanceof Error ? lastErr.message : String(lastErr),
+      );
+    }
+    throw toGeminiAppError(lastErr, "Gemini generate");
+  }
+
+  // Lớp 2: nếu chưa anti-recitation thì gọi lại toàn bộ models với paraphrase
+  if (!opts?.antiRecitation && isGeminiRecitationError(lastErr)) {
+    console.warn("[gemini] Retry toàn bộ với anti-RECITATION paraphrase…");
+    return generateWithModelFallback(genAI, parts, apiKey, {
+      antiRecitation: true,
+      temperature: 0.65,
+    });
+  }
+
+  if (isGeminiRecitationError(lastErr)) {
+    throw new AppError(
+      502,
+      "Gemini liên tục chặn RECITATION (nội dung quá giống tài liệu). Thử ít file hơn, hoặc bật GENERATE bằng giáo trình ngắn hơn.",
+      { recitation: true },
+    );
   }
   throw toGeminiAppError(lastErr, "Gemini generate");
 }
@@ -322,8 +513,19 @@ function buildBatchPrompt(input: {
   need: number;
   clinicalCases?: ClinicalCaseInput[];
   isFirst: boolean;
+  includeSituational: boolean;
+  topicHint?: string;
 }): string {
-  const { labels, targetCount, already, need, clinicalCases, isFirst } = input;
+  const {
+    labels,
+    targetCount,
+    already,
+    need,
+    clinicalCases,
+    isFirst,
+    includeSituational,
+    topicHint,
+  } = input;
   let prompt = `Tài liệu đính kèm (${labels.length}): ${labels.join(", ")}.\n`;
   prompt += `Mục tiêu ngân hàng: ${targetCount} câu UNIQUE.\n`;
   prompt += `Đã có: ${already.length} câu unique. Lần này hãy trả thêm tối đa ${Math.min(BATCH_SIZE, need)} câu MỚI (stem khác rõ các câu đã có).\n`;
@@ -335,21 +537,38 @@ function buildBatchPrompt(input: {
   if (isFirst) {
     prompt +=
       "\nChọn EXTRACT hoặc GENERATE đúng loại tài liệu. Quét HẾT nội dung đính kèm.\n";
-    prompt +=
-      'Bắt buộc tự tạo sẵn một phần câu type "lam_sang" (case lâm sàng) từ nội dung tài liệu — không chờ case người dùng.\n';
+    if (includeSituational) {
+      prompt +=
+        'Batch này BẮT BUỘC trộn cả câu lý thuyết type "trac_nghiem" (~55%) VÀ câu tình huống type "tinh_huong"/"lam_sang" (~45%) — không chỉ một loại.\n';
+    }
   } else {
     prompt +=
       "\nTiếp tục bổ sung câu mới từ phần chưa khai thác / góc hỏi khác. Không lặp ý đã có.\n";
-    const lamSangCount = already.filter((q) => q.type === "lam_sang").length;
-    const targetLamSang = Math.max(2, Math.round(targetCount * 0.2));
-    if (lamSangCount < targetLamSang) {
-      prompt += `Ưu tiên thêm case lâm sàng type "lam_sang" (hiện ${lamSangCount}/${targetLamSang} gợi ý) nếu còn tình huống độc lập từ tài liệu.\n`;
+    if (includeSituational) {
+      const sitCount = already.filter((q) => isSituationalType(q.type)).length;
+      const theoryCount = already.length - sitCount;
+      const targetSit = Math.max(3, Math.round(targetCount * 0.45));
+      const targetTheory = Math.max(3, Math.round(targetCount * 0.55));
+      if (sitCount < targetSit) {
+        prompt += `Thiếu tình huống (hiện ${sitCount}/${targetSit}) → ưu tiên thêm "tinh_huong"/"lam_sang".\n`;
+      }
+      if (theoryCount < targetTheory) {
+        prompt += `Thiếu lý thuyết (hiện ${theoryCount}/${targetTheory}) → ưu tiên thêm "trac_nghiem".\n`;
+      }
+      if (sitCount >= targetSit && theoryCount >= targetTheory) {
+        prompt +=
+          "Vẫn trộn đều cả lý thuyết và tình huống trong batch này.\n";
+      }
     }
+  }
+
+  if (topicHint?.trim()) {
+    prompt += `\nƯu tiên chủ đề: ${topicHint.trim()}\n`;
   }
 
   if (clinicalCases?.length) {
     prompt +=
-      '\n(Tuỳ chọn thêm) Ưu tiên hiện thực các case người dùng dưới đây thành câu type "lam_sang" (vẫn được tự tạo thêm case khác):\n';
+      '\n(Tuỳ chọn thêm) Hiện thực các case dưới đây thành câu type "lam_sang" hoặc "tinh_huong":\n';
     clinicalCases.forEach((c, i) => {
       prompt += `[Case ${i + 1}] ${c.situation}`;
       if (c.suggestedQuestion) prompt += ` | Q: ${c.suggestedQuestion}`;
@@ -377,7 +596,13 @@ export async function generateQuestionBankFromFiles(
   }
 
   const targetCount = Math.max(1, Math.min(500, Math.floor(options.targetCount)));
-  console.info(`[gemini] Có ${keys.length} API key khả dụng`);
+  const includeSituational = options.includeSituational !== false;
+  const difficulty: QuizDifficulty = options.difficulty ?? "trung_binh";
+  const topicHint = options.topicHint?.trim() || undefined;
+  const promptOpts = { includeSituational, difficulty, topicHint };
+  console.info(
+    `[gemini] Có ${keys.length} API key · tình huống=${includeSituational} · độ khó=${difficulty}`,
+  );
 
   let keyIdx = 0;
   let clients = createGeminiClients(keys[keyIdx]);
@@ -455,7 +680,7 @@ export async function generateQuestionBankFromFiles(
       );
 
       const parts: ContentPart[] = [
-        { text: buildSystemPrompt(targetCount) },
+        { text: buildSystemPrompt(targetCount, promptOpts) },
         ...sourceParts,
         {
           text: buildBatchPrompt({
@@ -468,6 +693,8 @@ export async function generateQuestionBankFromFiles(
                 ? options.clinicalCases
                 : undefined,
             isFirst: round === 0 && kept.length === 0,
+            includeSituational,
+            topicHint,
           }),
         },
       ];
@@ -478,6 +705,10 @@ export async function generateQuestionBankFromFiles(
           clients.genAI,
           parts,
           clients.apiKey,
+          // Từ batch 2 trở đi / khi đã có câu: ưu tiên paraphrase để tránh RECITATION
+          kept.length > 0 || round > 0
+            ? { antiRecitation: true, temperature: 0.5 }
+            : undefined,
         );
       } catch (err) {
         if (isGeminiKeyExhaustedError(err) && keyIdx + 1 < keys.length) {
@@ -487,10 +718,74 @@ export async function generateQuestionBankFromFiles(
           round -= 1;
           continue;
         }
-        throw err;
+        if (isGeminiRecitationError(err)) {
+          console.warn(
+            `[gemini] RECITATION batch ${round + 1} — thử paraphrase lần nữa…`,
+          );
+          try {
+            result = await generateWithModelFallback(
+              clients.genAI,
+              [
+                ...parts,
+                {
+                  text: "BẮT BUỘC mode GENERATE: viết câu hỏi mới paraphrase, tuyệt đối không trích nguyên văn tài liệu.",
+                },
+              ],
+              clients.apiKey,
+              { antiRecitation: true, temperature: 0.7 },
+            );
+          } catch (err2) {
+            if (kept.length > 0) {
+              console.warn(
+                `[gemini] RECITATION kéo dài — giữ ${kept.length} câu đã có`,
+              );
+              rawMeta = {
+                ...rawMeta,
+                lyDoBankNganHonTarget:
+                  `Gemini bị chặn RECITATION khi đọc tài liệu (quá giống nguồn). Đã giữ ${kept.length} câu đã tạo được.`,
+              };
+              break;
+            }
+            throw new AppError(
+              502,
+              "Gemini chặn RECITATION (tài liệu bị coi là nội dung có bản quyền / trích quá sát). Thử upload ít file hơn, hoặc file giáo trình ngắn hơn, rồi tạo lại.",
+              { recitation: true },
+            );
+          }
+        } else {
+          throw err;
+        }
       }
 
-      const { text, finishReason } = safeResponseText(result);
+      let text = "";
+      let finishReason: string | undefined;
+      try {
+        ({ text, finishReason } = safeResponseText(result));
+      } catch (err) {
+        if (isGeminiRecitationError(err) && kept.length > 0) {
+          console.warn(
+            `[gemini] RECITATION khi đọc response — giữ ${kept.length} câu`,
+          );
+          rawMeta = {
+            ...rawMeta,
+            lyDoBankNganHonTarget:
+              `Gemini bị chặn RECITATION. Đã giữ ${kept.length} câu đã tạo được.`,
+          };
+          break;
+        }
+        if (isGeminiRecitationError(err)) {
+          stalledRounds += 1;
+          if (stalledRounds >= 3) {
+            throw new AppError(
+              502,
+              "Gemini chặn RECITATION liên tục. Thử ít file / file ngắn hơn.",
+              { recitation: true },
+            );
+          }
+          continue;
+        }
+        throw err;
+      }
       if (!text.trim()) {
         stalledRounds += 1;
         if (stalledRounds >= 2) break;
@@ -611,6 +906,11 @@ export async function generateQuestionBankFromText(
   let keyIdx = 0;
   let clients = createGeminiClients(keys[keyIdx]);
   const target = Math.max(1, Math.min(500, targetCount));
+  const promptOpts = {
+    includeSituational: true,
+    difficulty: "trung_binh" as QuizDifficulty,
+    topicHint: undefined as string | undefined,
+  };
   let kept: Question[] = [];
   let mode: DocumentMode = "GENERATE";
   let modeReason = "GENERATE từ text.";
@@ -625,7 +925,7 @@ export async function generateQuestionBankFromText(
         result = await generateWithModelFallback(
           clients.genAI,
           [
-            { text: buildSystemPrompt(target) },
+            { text: buildSystemPrompt(target, promptOpts) },
             {
               text: `Tài liệu:\n"""\n${fullText.slice(0, 200_000)}\n"""\n\n${buildBatchPrompt({
                 labels: ["document.txt"],
@@ -634,6 +934,7 @@ export async function generateQuestionBankFromText(
                 need,
                 clinicalCases: round === 0 ? clinicalCases : undefined,
                 isFirst: round === 0,
+                includeSituational: true,
               })}`,
             },
           ],

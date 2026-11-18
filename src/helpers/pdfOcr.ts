@@ -8,12 +8,13 @@ import {
   GoogleAIFileManager,
 } from "@google/generative-ai/server";
 import { createWorker } from "tesseract.js";
-import { env } from "../config/env";
+import { getRuntimeConfig } from "../config/runtimeConfig";
 import {
   createGeminiClients,
   isGeminiKeyExhaustedError,
   markGeminiKeyExhausted,
   maskGeminiKey,
+  recordGeminiKeyUse,
   requireGeminiApiKeys,
 } from "./geminiKeys";
 import { AppError } from "../middlewares/error.middleware";
@@ -38,7 +39,7 @@ function usable(text: string): boolean {
 }
 
 function ocrModelCandidates(): string[] {
-  const preferred = env.geminiModel?.trim();
+  const preferred = getRuntimeConfig().geminiModel?.trim();
   const list = preferred
     ? [preferred, ...FALLBACK_MODELS.filter((m) => m !== preferred)]
     : [...FALLBACK_MODELS];
@@ -98,6 +99,7 @@ async function geminiOcrOnePdf(
   fileManager: GoogleAIFileManager,
   pdfPath: string,
   label: string,
+  apiKey?: string,
 ): Promise<string> {
   const upload = await fileManager.uploadFile(pdfPath, {
     mimeType: "application/pdf",
@@ -114,6 +116,7 @@ async function geminiOcrOnePdf(
       });
       for (let attempt = 0; attempt < 2; attempt += 1) {
         try {
+          if (apiKey) recordGeminiKeyUse(apiKey);
           const result = await model.generateContent([
             {
               fileData: {
@@ -186,6 +189,7 @@ async function extractWithGeminiPages(filePath: string): Promise<string> {
           clients.fileManager,
           pagePath,
           `page-${i + 1}`,
+          clients.apiKey,
         );
         if (text) {
           parts.push(`----- Trang ${i + 1} -----\n${text}`);

@@ -40,6 +40,11 @@ export const generateQuizSchema = z
       .default(DEFAULT_THOI_GIAN_PHUT),
     /** Số câu UNIQUE muốn có trong ngân hàng (Gemini sinh/trích đến đủ). */
     nNganHang: z.coerce.number().int().min(1).max(500).optional(),
+    /** Trộn câu hỏi tình huống kiểu NotebookLM (mặc định true). */
+    includeSituational: z.coerce.boolean().optional().default(true),
+    difficulty: z.enum(["de", "trung_binh", "kho"]).optional().default("trung_binh"),
+    /** Gợi ý chủ đề / prompt thêm cho Gemini. */
+    topicHint: z.string().max(500).optional(),
     clinicalCases: z.array(clinicalCaseSchema).max(20).optional(),
   })
   .refine((v) => Boolean(v.documentId) || (v.documentIds?.length ?? 0) > 0, {

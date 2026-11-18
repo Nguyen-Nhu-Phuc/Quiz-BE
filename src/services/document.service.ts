@@ -1,5 +1,6 @@
 import fs from "node:fs/promises";
 import type { Types } from "mongoose";
+import { decodeUploadFilename } from "../helpers/filenameEncoding";
 import { requireObjectId } from "../helpers/objectId";
 import { parseDocumentToText } from "../helpers/parseDocument";
 import { AppError } from "../middlewares/error.middleware";
@@ -13,7 +14,7 @@ export async function createDocumentFromUpload(input: {
 }) {
   const doc = await DocumentModel.create({
     userId: input.userId,
-    originalName: input.file.originalname,
+    originalName: decodeUploadFilename(input.file.originalname),
     mimeType: input.file.mimetype,
     size: input.file.size,
     storagePath: input.file.path,

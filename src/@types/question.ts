@@ -1,6 +1,9 @@
 export type AnswerConfidence = "cao" | "trung_binh";
 
-export type QuestionType = "trac_nghiem" | "lam_sang" | string;
+/** trac_nghiem = kiến thức thẳng; tinh_huong = tình huống (kiểu NotebookLM); lam_sang = tình huống y khoa */
+export type QuestionType = "trac_nghiem" | "tinh_huong" | "lam_sang" | string;
+
+export type QuizDifficulty = "de" | "trung_binh" | "kho";
 
 export interface Question {
   id: string;

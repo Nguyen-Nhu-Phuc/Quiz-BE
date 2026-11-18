@@ -7,6 +7,7 @@ import {
   MAX_UPLOAD_FILES,
 } from "../config/constants";
 import { env } from "../config/env";
+import { decodeUploadFilename } from "../helpers/filenameEncoding";
 import { AppError } from "./error.middleware";
 
 if (!fs.existsSync(env.uploadDir)) {
@@ -18,7 +19,8 @@ const storage = multer.diskStorage({
     cb(null, env.uploadDir);
   },
   filename: (_req, file, cb) => {
-    const safe = file.originalname.replace(/[^\w.\-()+\sÀ-ỹ]/gi, "_");
+    const name = decodeUploadFilename(file.originalname);
+    const safe = name.replace(/[^\w.\-()+\sÀ-ỹ]/gi, "_");
     cb(null, `${Date.now()}-${Math.random().toString(36).slice(2, 8)}-${safe}`);
   },
 });
@@ -28,7 +30,7 @@ function fileFilter(
   file: Express.Multer.File,
   cb: multer.FileFilterCallback,
 ): void {
-  const ext = path.extname(file.originalname).toLowerCase();
+  const ext = path.extname(decodeUploadFilename(file.originalname)).toLowerCase();
   const mime = (file.mimetype || "").toLowerCase();
   const mimeOk =
     (ALLOWED_MIME_TYPES as readonly string[]).includes(mime) ||

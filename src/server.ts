@@ -8,9 +8,12 @@ import {
   notFoundHandler,
 } from "./middlewares/error.middleware";
 import routes from "./routes";
+import { loadRuntimeFromDb } from "./services/admin.service";
 
 async function bootstrap() {
   await connectDb();
+  await loadRuntimeFromDb();
+  console.log("[server] App settings loaded (DB override nếu có)");
 
   const app = express();
 
