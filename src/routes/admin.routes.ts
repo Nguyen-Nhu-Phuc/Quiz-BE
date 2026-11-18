@@ -3,6 +3,8 @@ import * as adminController from "../controllers/admin.controller";
 import { adminAuthMiddleware } from "../middlewares/adminAuth.middleware";
 import { validate } from "../middlewares/validate.middleware";
 import {
+  adminGeminiKeyBodySchema,
+  adminGeminiKeyIndexSchema,
   adminGoogleLoginSchema,
   adminIdParamSchema,
   adminListQuerySchema,
@@ -27,6 +29,24 @@ router.put(
   "/settings",
   validate(updateAdminSettingsSchema),
   adminController.updateSettings,
+);
+
+router.get("/gemini-keys", adminController.listGeminiKeys);
+router.post(
+  "/gemini-keys",
+  validate(adminGeminiKeyBodySchema),
+  adminController.addGeminiKey,
+);
+router.put(
+  "/gemini-keys/:index",
+  validate(adminGeminiKeyIndexSchema, "params"),
+  validate(adminGeminiKeyBodySchema),
+  adminController.updateGeminiKey,
+);
+router.delete(
+  "/gemini-keys/:index",
+  validate(adminGeminiKeyIndexSchema, "params"),
+  adminController.deleteGeminiKey,
 );
 
 router.get("/overview", adminController.getOverview);

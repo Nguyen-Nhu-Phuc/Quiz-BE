@@ -109,11 +109,108 @@ function parseKeysInput(raw: string | undefined): string[] | undefined {
     .filter(Boolean);
 }
 
-export async function updateAdminSettings(input: UpdateAdminSettingsInput) {
+async function getOrCreateSettingsDoc() {
   let doc = await AppSettingsModel.findOne({ key: "default" });
   if (!doc) {
     doc = new AppSettingsModel({ key: "default" });
   }
+  return doc;
+}
+
+/** Danh sách key lưu trong DB (primary + phụ), thứ tự ổn định. */
+function flattenStoredKeys(doc: {
+  geminiApiKey?: string;
+  geminiApiKeys?: string[];
+}): string[] {
+  const primary = (doc.geminiApiKey ?? "").trim();
+  const backups = (doc.geminiApiKeys ?? []).map((k) => k.trim()).filter(Boolean);
+  const all = primary ? [primary, ...backups.filter((k) => k !== primary)] : backups;
+  return [...new Set(all)];
+}
+
+function applyStoredKeys(
+  doc: {
+    geminiApiKey: string;
+    geminiApiKeys: string[];
+  },
+  keys: string[],
+) {
+  const unique = [...new Set(keys.map((k) => k.trim()).filter(Boolean))];
+  doc.geminiApiKey = unique[0] ?? "";
+  doc.geminiApiKeys = unique.slice(1);
+}
+
+export type StoredGeminiKeyRow = {
+  index: number;
+  masked: string;
+  isPrimary: boolean;
+};
+
+export async function listStoredGeminiKeys(): Promise<StoredGeminiKeyRow[]> {
+  const doc = await AppSettingsModel.findOne({ key: "default" }).lean();
+  if (!doc) return [];
+  return flattenStoredKeys(doc).map((key, index) => ({
+    index,
+    masked: maskOrEmpty(key),
+    isPrimary: index === 0,
+  }));
+}
+
+export async function addGeminiKey(rawKey: string) {
+  const key = rawKey.trim();
+  if (!key) throw new AppError(400, "Thiếu API key.");
+  const doc = await getOrCreateSettingsDoc();
+  const keys = flattenStoredKeys(doc);
+  if (keys.includes(key)) {
+    throw new AppError(409, "API key này đã tồn tại.");
+  }
+  keys.push(key);
+  applyStoredKeys(doc, keys);
+  await doc.save();
+  await loadRuntimeFromDb();
+  return listStoredGeminiKeys();
+}
+
+export async function updateGeminiKey(index: number, rawKey: string) {
+  const key = rawKey.trim();
+  if (!key) throw new AppError(400, "Thiếu API key mới.");
+  if (!Number.isInteger(index) || index < 0) {
+    throw new AppError(400, "Index key không hợp lệ.");
+  }
+  const doc = await getOrCreateSettingsDoc();
+  const keys = flattenStoredKeys(doc);
+  if (index >= keys.length) {
+    throw new AppError(404, "Không tìm thấy API key.");
+  }
+  const duplicate = keys.findIndex((k, i) => i !== index && k === key);
+  if (duplicate >= 0) {
+    throw new AppError(409, "API key này đã tồn tại ở vị trí khác.");
+  }
+  keys[index] = key;
+  applyStoredKeys(doc, keys);
+  await doc.save();
+  await loadRuntimeFromDb();
+  return listStoredGeminiKeys();
+}
+
+export async function deleteGeminiKey(index: number) {
+  if (!Number.isInteger(index) || index < 0) {
+    throw new AppError(400, "Index key không hợp lệ.");
+  }
+  const doc = await getOrCreateSettingsDoc();
+  const keys = flattenStoredKeys(doc);
+  if (index >= keys.length) {
+    throw new AppError(404, "Không tìm thấy API key.");
+  }
+  keys.splice(index, 1);
+  applyStoredKeys(doc, keys);
+  await doc.save();
+  await loadRuntimeFromDb();
+  return listStoredGeminiKeys();
+}
+
+export async function updateAdminSettings(input: UpdateAdminSettingsInput) {
+  const doc = await getOrCreateSettingsDoc();
 
   // Key trống / chỉ khoảng trắng = giữ nguyên; có giá trị mới = thay
   if (typeof input.geminiApiKey === "string" && input.geminiApiKey.trim()) {

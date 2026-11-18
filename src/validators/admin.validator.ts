@@ -24,6 +24,14 @@ export const updateAdminSettingsSchema = z.object({
   nNganHang: z.coerce.number().int().min(1).max(500).optional(),
 });
 
+export const adminGeminiKeyBodySchema = z.object({
+  key: z.string().min(10, "API key quá ngắn").max(200),
+});
+
+export const adminGeminiKeyIndexSchema = z.object({
+  index: z.coerce.number().int().min(0),
+});
+
 export const adminListQuerySchema = z.object({
   page: z.coerce.number().int().min(1).optional(),
   limit: z.coerce.number().int().min(1).max(100).optional(),

@@ -71,6 +71,58 @@ export async function updateSettings(
   }
 }
 
+export async function listGeminiKeys(
+  _req: Request,
+  res: Response,
+  next: NextFunction,
+): Promise<void> {
+  try {
+    ok(res, { items: await adminService.listStoredGeminiKeys() });
+  } catch (err) {
+    next(err);
+  }
+}
+
+export async function addGeminiKey(
+  req: Request,
+  res: Response,
+  next: NextFunction,
+): Promise<void> {
+  try {
+    ok(res, { items: await adminService.addGeminiKey(req.body.key) });
+  } catch (err) {
+    next(err);
+  }
+}
+
+export async function updateGeminiKey(
+  req: Request,
+  res: Response,
+  next: NextFunction,
+): Promise<void> {
+  try {
+    const index = Number(req.params.index);
+    ok(res, {
+      items: await adminService.updateGeminiKey(index, req.body.key),
+    });
+  } catch (err) {
+    next(err);
+  }
+}
+
+export async function deleteGeminiKey(
+  req: Request,
+  res: Response,
+  next: NextFunction,
+): Promise<void> {
+  try {
+    const index = Number(req.params.index);
+    ok(res, { items: await adminService.deleteGeminiKey(index) });
+  } catch (err) {
+    next(err);
+  }
+}
+
 export async function getOverview(
   _req: Request,
   res: Response,
