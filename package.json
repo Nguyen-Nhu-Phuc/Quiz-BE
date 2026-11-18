@@ -2,7 +2,7 @@
   "name": "quizpractice-backend",
   "version": "1.0.0",
   "private": true,
-  "description": "QuizPractice API — ôn luyện trắc nghiệm từ tài liệu + Gemini",
+  "description": "Mỹ Miều Quiz API — ôn luyện trắc nghiệm từ tài liệu + Gemini",
   "main": "dist/server.js",
   "scripts": {
     "dev": "tsx watch src/server.ts",

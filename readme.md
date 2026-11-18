@@ -1,4 +1,4 @@
-# QuizPractice Backend
+# Mỹ Miều Quiz — Backend
 
 API Node.js + Express + TypeScript + MongoDB Atlas + Gemini.
 

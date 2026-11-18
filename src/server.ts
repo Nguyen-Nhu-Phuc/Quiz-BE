@@ -34,7 +34,7 @@ async function bootstrap() {
 
   // Generate quiz (nhiều chunk Gemini) có thể rất lâu
   const server = app.listen(env.port, () => {
-    console.log(`[server] QuizPractice API listening on :${env.port}`);
+    console.log(`[server] Mỹ Miều Quiz API listening on :${env.port}`);
   });
   const thirtyMin = 30 * 60_000;
   server.timeout = thirtyMin;
