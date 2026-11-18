@@ -1,0 +1,6 @@
+uploads
+*.pdf
+*.docx
+node_modules
+.env
+.git

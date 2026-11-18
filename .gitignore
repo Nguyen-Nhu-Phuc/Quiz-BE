@@ -10,3 +10,5 @@ uploads/*
 *.traineddata
 .turbo/
 coverage/
+.vercel
+.env*

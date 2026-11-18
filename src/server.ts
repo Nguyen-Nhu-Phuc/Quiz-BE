@@ -1,13 +1,6 @@
-import cors from "cors";
-import express from "express";
-import helmet from "helmet";
+import { createApp } from "./app";
 import { connectDb } from "./config/db";
 import { env } from "./config/env";
-import {
-  errorHandler,
-  notFoundHandler,
-} from "./middlewares/error.middleware";
-import routes from "./routes";
 import { loadRuntimeFromDb } from "./services/admin.service";
 
 async function bootstrap() {
@@ -15,22 +8,7 @@ async function bootstrap() {
   await loadRuntimeFromDb();
   console.log("[server] App settings loaded (DB override nếu có)");
 
-  const app = express();
-
-  app.use(helmet());
-  app.use(
-    cors({
-      origin: env.clientOrigin,
-      credentials: true,
-    }),
-  );
-  app.use(express.json({ limit: "2mb" }));
-  app.use(express.urlencoded({ extended: true }));
-
-  app.use("/api", routes);
-
-  app.use(notFoundHandler);
-  app.use(errorHandler);
+  const app = createApp();
 
   // Generate quiz (nhiều chunk Gemini) có thể rất lâu
   const server = app.listen(env.port, () => {

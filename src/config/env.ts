@@ -45,6 +45,13 @@ if (nodeEnv === "production" && adminEmails.length === 0) {
   );
 }
 
+const onVercel = process.env.VERCEL === "1" || Boolean(process.env.VERCEL_ENV);
+
+/** Vercel chỉ ghi được /tmp — upload local vẫn dùng ./uploads */
+const defaultUploadDir = onVercel
+  ? path.join("/tmp", "my-mieu-quiz-uploads")
+  : path.resolve(process.cwd(), process.env.UPLOAD_DIR ?? "uploads");
+
 export const env = {
   port: Number(process.env.PORT ?? 5000),
   mongoUri: required("MONGO_URI", "mongodb://127.0.0.1:27017/quizpractice"),
@@ -60,19 +67,26 @@ export const env = {
   geminiApiKeys: parseGeminiApiKeysExtra(),
   geminiModel: process.env.GEMINI_MODEL ?? "gemini-3.5-flash",
   clientOrigin: process.env.CLIENT_ORIGIN ?? "http://localhost:3000",
-  uploadDir: path.resolve(process.cwd(), process.env.UPLOAD_DIR ?? "uploads"),
+  uploadDir: process.env.UPLOAD_DIR
+    ? onVercel
+      ? path.join("/tmp", process.env.UPLOAD_DIR)
+      : path.resolve(process.cwd(), process.env.UPLOAD_DIR)
+    : defaultUploadDir,
   /** 0 hoặc không set = không giới hạn dung lượng file. */
   maxUploadMb: Number(process.env.MAX_UPLOAD_MB ?? 0),
   /**
    * Ngân sách thời gian tạo câu hỏi (giây). Hết giờ dừng sớm, giữ câu đã tạo.
-   * Mặc định 180s (3 phút).
+   * Mặc định 180s (3 phút). Trên Vercel Hobby tối đa ~60s / Pro ~300s.
    */
   generationTimeBudgetSec: Math.max(
     60,
     Math.min(
-      900,
-      Number(process.env.GENERATION_TIME_BUDGET_SEC ?? 180) || 180,
+      onVercel ? 55 : 900,
+      Number(
+        process.env.GENERATION_TIME_BUDGET_SEC ?? (onVercel ? 50 : 180),
+      ) || (onVercel ? 50 : 180),
     ),
   ),
   nodeEnv,
+  onVercel,
 };
